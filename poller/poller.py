@@ -11,12 +11,15 @@ Every processed message is MOVED out of SOURCE_FOLDER (-> PROCESSED_FOLDER on
 success, REJECTED_FOLDER otherwise) which is the idempotency guard.
 Stdlib only + external `lp` and `soffice`. Fail-closed on the allow-list.
 """
-import os, ssl, sys, time, email, subprocess, tempfile, logging, mimetypes
+import os, ssl, sys, time, email, subprocess, tempfile, logging, mimetypes, re
 from email.header import decode_header, make_header
 from email.utils import parseaddr, getaddresses, formatdate, make_msgid
 from email.message import EmailMessage
 import imaplib, smtplib, threading, json as _json
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+from directive_parser import parse_email_message
+
 
 def env(k, d=None, req=False):
     v = os.environ.get(k, d)
@@ -114,6 +117,46 @@ def move(M, uid, dest):
     typ, _ = M.uid("MOVE", uid, dest)
     if typ != "OK":
         M.uid("COPY", uid, dest); M.uid("STORE", uid, "+FLAGS", r"(\Deleted)"); M.expunge()
+
+def count_pdf_pages(path):
+    if not path or not os.path.exists(path) or not path.lower().endswith(".pdf"):
+        return None
+    try:
+        from pypdf import PdfReader
+        return len(PdfReader(path).pages)
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(["pdfinfo", path], capture_output=True, text=True, timeout=5)
+        for line in r.stdout.splitlines():
+            if line.startswith("Pages:"):
+                return int(line.split(":")[1].strip())
+    except Exception:
+        pass
+    try:
+        with open(path, "rb") as f:
+            content = f.read()
+        matches = re.findall(rb"/Type\s*/Pages\b[^>]*?/Count\s+(\d+)", content)
+        if matches:
+            return int(matches[-1])
+        page_matches = re.findall(rb"/Type\s*/Page\b", content)
+        if page_matches:
+            return len(page_matches)
+    except Exception:
+        pass
+    return None
+
+def parse_directive_opts(msg, page_count=None):
+    directives = parse_email_message(msg, page_count=page_count)
+    if not directives:
+        log.info("no print directives found in email subject/body")
+        return PRINT_OPTS.copy()
+    merged = PRINT_OPTS.copy()
+    for key, value in directives.items():
+        if value:
+            merged[key] = value
+    log.info("parsed print directives from email (page_count=%s): %s", page_count, directives)
+    return merged
 
 def print_file(path, opts):
     cmd = ["lp", "-d", PRINTER]
@@ -213,13 +256,17 @@ def process(M, uid):
                 if not target: errors.append(f"{fn}: conversion failed"); continue
             else:
                 log.info("skip unsupported attachment %s (%s)", fn, ctype); continue
-            ok, detail = print_file(target, PRINT_OPTS)
+            page_count = count_pdf_pages(target)
+            opts = parse_directive_opts(msg, page_count=page_count)
+            ok, detail = print_file(target, opts)
             (printed if ok else errors).append(fn if ok else f"{fn}: {detail}")
         # No printable attachment -> print the email body itself (forward-to-print)
         if not printed and PRINT_BODY:
             body_pdf = render_body(msg, wd)
             if body_pdf:
-                ok, detail = print_file(body_pdf, PRINT_OPTS)
+                page_count = count_pdf_pages(body_pdf)
+                opts = parse_directive_opts(msg, page_count=page_count)
+                ok, detail = print_file(body_pdf, opts)
                 (printed if ok else errors).append("email body" if ok else f"email body: {detail}")
             else:
                 errors.append("no printable attachment and no renderable body")

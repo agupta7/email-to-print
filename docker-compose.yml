@@ -22,8 +22,6 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    volumes:
-      - ./poller/poller.py:/app/poller.py:ro
 
 volumes:
   bridge-data:

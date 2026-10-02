@@ -18,7 +18,7 @@ RUN mkdir -p /models && \
 
 # Setup Python app environment
 WORKDIR /app
-COPY poller.py .
+COPY poller.py directive_parser.py ./
 ENV PYTHONUNBUFFERED=1 HOME=/home/poller LLAMA_MODEL_PATH=/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
 USER poller
 CMD ["python3", "poller.py"]
